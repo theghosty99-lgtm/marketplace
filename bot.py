@@ -591,33 +591,29 @@ async def on_ready():
     except Exception as e:
         log.exception(f"Failed to re-register views: {e}")
     
-    # Sync commands to guild
-    try:
-        synced = await bot.tree.sync(guild=discord.Object(id=GUILD_ID))
-        log.info(f"✅ SYNCED {len(synced)} COMMANDS TO GUILD:")
-        for cmd in synced:
-            log.info(f"   ✓ /{cmd.name}")
-    except discord.Forbidden:
-        log.error("❌ FORBIDDEN - Bot lacks permission to sync commands")
-        log.error("   Fix: Discord Dev Portal > Installation > Scopes > applications.commands")
-    except discord.HTTPException as e:
-        log.error(f"❌ HTTP ERROR: {e}")
-    except Exception as e:
-        log.exception(f"❌ COMMAND SYNC FAILED: {e}")
+# Sync commands to guild
+try:
+    guild = discord.Object(id=GUILD_ID)
 
-@bot.event
-async def on_raw_message_delete(payload: discord.RawMessageDeleteEvent):
-    """Handle listing message deletion"""
-    try:
-        async with aiosqlite.connect(DB_PATH) as db:
-            await db.execute(
-                "DELETE FROM listings WHERE message_id = ? AND channel_id = ?",
-                (str(payload.message_id), str(payload.channel_id))
-            )
-            await db.commit()
-        log.info(f"Deleted listing DB entry for message {payload.message_id}")
-    except Exception as e:
-        log.exception(f"Failed to handle message delete: {e}")
+    # Copy global commands to this guild
+    bot.tree.copy_global_to(guild=guild)
+
+    # Sync them
+    synced = await bot.tree.sync(guild=guild)
+
+    log.info(f"✅ SYNCED {len(synced)} COMMANDS TO GUILD:")
+    for cmd in synced:
+        log.info(f"   ✓ /{cmd.name}")
+
+except discord.Forbidden:
+    log.error("❌ FORBIDDEN - Bot lacks permission to sync commands")
+    log.error("   Fix: Discord Dev Portal > Installation > Scopes > applications.commands")
+
+except discord.HTTPException as e:
+    log.error(f"❌ HTTP ERROR: {e}")
+
+except Exception as e:
+    log.exception(f"❌ COMMAND SYNC FAILED: {e}")
 
 # ============================================================================
 # MAIN
