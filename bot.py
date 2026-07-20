@@ -45,7 +45,7 @@ intents = discord.Intents.default()
 intents.guilds = True
 intents.members = True  # required for permission overwrites & role checks
 
-bot = commands.Bot(command_prefix="!", intents=intents)
+bot = commands.Bot(command_prefix=".", intents=intents)
 
 # DB: initialize
 async def init_db():
