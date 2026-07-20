@@ -2,7 +2,6 @@
 Discord Marketplace Bot - FULLY FIXED VERSION
 - Command sync now works properly
 - All slash commands functional
-- Tested and verified
 """
 
 import os
@@ -20,14 +19,9 @@ from discord import PermissionOverwrite
 
 load_dotenv()
 
-# Setup logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
+logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("marketplace")
 
-# Load config
 TOKEN = os.getenv("DISCORD_TOKEN")
 GUILD_ID = int(os.getenv("GUILD_ID")) if os.getenv("GUILD_ID") else None
 SELLING_CHANNEL_ID = int(os.getenv("SELLING_CHANNEL_ID")) if os.getenv("SELLING_CHANNEL_ID") else None
@@ -40,7 +34,6 @@ DB_PATH = os.getenv("DB_PATH") or "marketplace.db"
 MAX_LISTINGS_PER_USER_PER_DAY = int(os.getenv("MAX_LISTINGS_PER_USER_PER_DAY") or 5)
 MARKETPLACE_ROLE_ID = int(os.getenv("MARKETPLACE_ROLE_ID")) if os.getenv("MARKETPLACE_ROLE_ID") else None
 
-# Validate
 if not TOKEN:
     log.error("DISCORD_TOKEN missing")
     raise SystemExit(1)
@@ -49,617 +42,379 @@ if not GUILD_ID:
     log.error("GUILD_ID missing")
     raise SystemExit(1)
 
-# Setup bot
 intents = discord.Intents.default()
 intents.guilds = True
 intents.members = True
 intents.message_content = True
-intents.guild_messages = True
-intents.dm_messages = True
 
 bot = commands.Bot(command_prefix=".", intents=intents)
 
-# ============================================================================
-# DATABASE SETUP
-# ============================================================================
-
 async def init_db():
-    """Initialize SQLite database"""
     async with aiosqlite.connect(DB_PATH) as db:
-        await db.executescript(
-            """
+        await db.executescript("""
             CREATE TABLE IF NOT EXISTS anonymous (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                user_id TEXT NOT NULL,
-                kind TEXT NOT NULL,
-                anon_name TEXT NOT NULL,
+                id INTEGER PRIMARY KEY,
+                user_id TEXT,
+                kind TEXT,
+                anon_name TEXT,
                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
                 UNIQUE(user_id, kind)
             );
-
             CREATE TABLE IF NOT EXISTS listings (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                listing_ref TEXT NOT NULL UNIQUE,
-                mode TEXT NOT NULL,
-                poster_id TEXT NOT NULL,
-                anon_name TEXT NOT NULL,
-                product TEXT NOT NULL,
+                id INTEGER PRIMARY KEY,
+                listing_ref TEXT UNIQUE,
+                mode TEXT,
+                poster_id TEXT,
+                anon_name TEXT,
+                product TEXT,
                 price TEXT,
                 details TEXT,
-                channel_id TEXT NOT NULL,
-                message_id TEXT NOT NULL,
+                channel_id TEXT,
+                message_id TEXT,
                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP
             );
-
             CREATE TABLE IF NOT EXISTS tickets (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                ticket_ref TEXT NOT NULL UNIQUE,
-                channel_id TEXT NOT NULL,
+                id INTEGER PRIMARY KEY,
+                ticket_ref TEXT UNIQUE,
+                channel_id TEXT,
                 listing_ref TEXT,
-                seller_id TEXT NOT NULL,
-                buyer_id TEXT NOT NULL,
-                status TEXT NOT NULL,
+                seller_id TEXT,
+                buyer_id TEXT,
+                status TEXT,
                 claimer_id TEXT,
                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP
             );
-
             CREATE TABLE IF NOT EXISTS reports (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                report_ref TEXT NOT NULL UNIQUE,
+                id INTEGER PRIMARY KEY,
+                report_ref TEXT UNIQUE,
                 ticket_ref TEXT,
                 listing_ref TEXT,
-                reporter_id TEXT NOT NULL,
+                reporter_id TEXT,
                 reason TEXT,
                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP
             );
-            """
-        )
+        """)
         await db.commit()
-    log.info("Database initialized")
-
-# ============================================================================
-# HELPER FUNCTIONS
-# ============================================================================
+    log.info("Database ready")
 
 def _rand_digits(n=4):
-    """Generate random digits"""
-    return "".join(str(random.randint(0, 9)) for _ in range(n))
+    return "".join(str(random.randint(0,9)) for _ in range(n))
 
 async def get_or_create_anon(user_id: int, kind: str) -> str:
-    """Get or create anonymous name"""
-    kind = kind if kind in ("seller", "buyer") else "seller"
+    kind = "seller" if kind == "seller" else "buyer"
     async with aiosqlite.connect(DB_PATH) as db:
-        cur = await db.execute(
-            "SELECT anon_name FROM anonymous WHERE user_id = ? AND kind = ?",
-            (str(user_id), kind)
-        )
+        cur = await db.execute("SELECT anon_name FROM anonymous WHERE user_id=? AND kind=?", (str(user_id), kind))
         row = await cur.fetchone()
         if row:
             return row[0]
-        
         for _ in range(10):
-            anon = ("Seller-" if kind == "seller" else "Buyer-") + _rand_digits(4)
-            c2 = await db.execute("SELECT 1 FROM anonymous WHERE anon_name = ?", (anon,))
-            exists = await c2.fetchone()
-            if not exists:
-                await db.execute(
-                    "INSERT INTO anonymous (user_id, kind, anon_name) VALUES (?, ?, ?)",
-                    (str(user_id), kind, anon)
-                )
+            anon = f"{'Seller' if kind=='seller' else 'Buyer'}-{_rand_digits(4)}"
+            c = await db.execute("SELECT 1 FROM anonymous WHERE anon_name=?", (anon,))
+            if not await c.fetchone():
+                await db.execute("INSERT INTO anonymous(user_id,kind,anon_name)VALUES(?,?,?)", (str(user_id), kind, anon))
                 await db.commit()
                 return anon
-        
-        anon = ("Seller-" if kind == "seller" else "Buyer-") + str(random.randint(1000, 9999))
-        await db.execute(
-            "INSERT INTO anonymous (user_id, kind, anon_name) VALUES (?, ?, ?)",
-            (str(user_id), kind, anon)
-        )
+        anon = f"{'Seller' if kind=='seller' else 'Buyer'}-{random.randint(1000,9999)}"
+        await db.execute("INSERT INTO anonymous(user_id,kind,anon_name)VALUES(?,?,?)", (str(user_id), kind, anon))
         await db.commit()
         return anon
 
-def _generate_listing_ref() -> str:
-    return "L-" + _rand_digits(6)
+def _gen_listing_ref():
+    return f"L-{_rand_digits(6)}"
 
-def _generate_ticket_ref() -> str:
-    return "T-" + _rand_digits(6)
+def _gen_ticket_ref():
+    return f"T-{_rand_digits(6)}"
 
-def _generate_report_ref() -> str:
-    return "R-" + _rand_digits(8)
+def _gen_report_ref():
+    return f"R-{_rand_digits(8)}"
 
-# URL pattern check
-URL_PATTERN = re.compile(r"https?://|discord\.gg|discordapp\.com/invite|\.gg/", re.IGNORECASE)
+URL_PATTERN = re.compile(r"https?://|discord\.gg|\.gg/", re.IGNORECASE)
 
-def contains_disallowed_links(text: str) -> bool:
-    """Check for disallowed links"""
-    if not text:
+def has_links(text):
+    return bool(URL_PATTERN.search(text or ""))
+
+def bot_can_create_channel(guild):
+    m = guild.get_member(bot.user.id)
+    return m and m.guild_permissions.manage_channels
+
+def bot_can_send(channel):
+    m = channel.guild.get_member(bot.user.id)
+    if not m:
         return False
-    return bool(URL_PATTERN.search(text))
+    p = channel.permissions_for(m)
+    return p.send_messages and p.embed_links
 
-# Permission checks
-def bot_can_create_channel(guild: discord.Guild) -> bool:
-    """Check if bot can create channels"""
-    member = guild.get_member(bot.user.id)
-    return member and member.guild_permissions.manage_channels
-
-def bot_can_send_in(channel: discord.abc.GuildChannel) -> bool:
-    """Check if bot can send in channel"""
-    member = channel.guild.get_member(bot.user.id)
-    if not member:
-        return False
-    perms = channel.permissions_for(member)
-    return perms.send_messages and perms.embed_links and perms.read_message_history
-
-def user_has_marketplace_role(member: discord.Member) -> bool:
-    """Check if user has marketplace role"""
+def has_marketplace_role(member):
     if not MARKETPLACE_ROLE_ID:
         return True
     return any(r.id == MARKETPLACE_ROLE_ID for r in member.roles)
 
-# ============================================================================
-# UI COMPONENTS
-# ============================================================================
-
 class DashboardView(View):
-    """Dashboard with Selling/Buying/Info buttons"""
     def __init__(self):
         super().__init__(timeout=None)
 
-    @discord.ui.button(label="Selling", style=discord.ButtonStyle.danger, emoji="🟥", custom_id="dashboard_selling")
-    async def selling(self, interaction: discord.Interaction, button: Button):
-        guild = interaction.guild
-        member = interaction.user if isinstance(interaction.user, discord.Member) else guild.get_member(interaction.user.id)
-        
-        if not member:
-            return await interaction.response.send_message("Member information not available.", ephemeral=True)
-        
-        if not user_has_marketplace_role(member):
-            return await interaction.response.send_message(
-                "❌ You must have the **Marketplace** role before creating a selling listing.",
-                ephemeral=True
-            )
-        
-        modal = ListingModal(mode="sell")
-        await interaction.response.send_modal(modal)
+    @discord.ui.button(label="Selling", style=discord.ButtonStyle.danger, emoji="🟥", custom_id="sell_btn")
+    async def sell_btn(self, i: discord.Interaction, b: Button):
+        g = i.guild
+        m = i.user if isinstance(i.user, discord.Member) else g.get_member(i.user.id)
+        if not m:
+            return await i.response.send_message("Member info unavailable", ephemeral=True)
+        if not has_marketplace_role(m):
+            return await i.response.send_message("Need Marketplace role", ephemeral=True)
+        await i.response.send_modal(ListingModal("sell"))
 
-    @discord.ui.button(label="Buying", style=discord.ButtonStyle.success, emoji="🟩", custom_id="dashboard_buying")
-    async def buying(self, interaction: discord.Interaction, button: Button):
-        modal = ListingModal(mode="buy")
-        await interaction.response.send_modal(modal)
+    @discord.ui.button(label="Buying", style=discord.ButtonStyle.success, emoji="🟩", custom_id="buy_btn")
+    async def buy_btn(self, i: discord.Interaction, b: Button):
+        await i.response.send_modal(ListingModal("buy"))
 
-    @discord.ui.button(label="Information", style=discord.ButtonStyle.secondary, emoji="ℹ️", custom_id="dashboard_info")
-    async def info(self, interaction: discord.Interaction, button: Button):
-        embed = discord.Embed(title="Marketplace Information", color=0x2F3136)
-        embed.add_field(
-            name="How it works",
-            value="Create a selling/buying listing from the dashboard. Contact the other party via private ticket.",
-            inline=False
-        )
-        embed.add_field(
-            name="Safety",
-            value="• Never send payment outside the trade ticket.\n• Always use official middleman when required.\n• Staff can monitor trades.\n• Report scammers with the Report button.",
-            inline=False
-        )
-        await interaction.response.send_message(embed=embed, ephemeral=True)
+    @discord.ui.button(label="Info", style=discord.ButtonStyle.secondary, emoji="ℹ️", custom_id="info_btn")
+    async def info_btn(self, i: discord.Interaction, b: Button):
+        e = discord.Embed(title="Marketplace", color=0x2F3136)
+        e.add_field(name="Rules", value="Keep trades in tickets.\nNever pay outside.\nReport scammers.", inline=False)
+        await i.response.send_message(embed=e, ephemeral=True)
 
-class ListingModal(Modal, title="Create Marketplace Listing"):
-    """Modal for creating listings"""
-    product = TextInput(label="Product Name", placeholder="Name of the product", max_length=150)
-    price = TextInput(label="Price or Budget", placeholder="e.g. $5, VHB, or Budget", max_length=64, required=False)
-    details = TextInput(
-        label="Details (no links!)",
-        placeholder="Payment methods, delivery, notes",
-        style=discord.TextStyle.long,
-        max_length=1500,
-        required=False
-    )
+class ListingModal(Modal, title="Create Listing"):
+    product = TextInput(label="Product", placeholder="Item name", max_length=150)
+    price = TextInput(label="Price", placeholder="$5 or Budget", max_length=64, required=False)
+    details = TextInput(label="Details", placeholder="Info", style=discord.TextStyle.long, max_length=1500, required=False)
 
-    def __init__(self, mode: str):
+    def __init__(self, mode):
         super().__init__()
         self.mode = mode
 
-    async def on_submit(self, interaction: discord.Interaction):
-        # Check for links
-        if contains_disallowed_links(self.product) or contains_disallowed_links(self.price) or contains_disallowed_links(self.details):
-            return await interaction.response.send_message(
-                "Your listing contains links or invites. Links are not allowed.",
-                ephemeral=True
-            )
+    async def on_submit(self, i: discord.Interaction):
+        if has_links(self.product.value) or has_links(self.price.value) or has_links(self.details.value):
+            return await i.response.send_message("No links allowed", ephemeral=True)
 
-        # If selling, verify marketplace role
         if self.mode == "sell":
-            guild = interaction.guild
-            member = interaction.user if isinstance(interaction.user, discord.Member) else guild.get_member(interaction.user.id)
-            if not member:
-                return await interaction.response.send_message("Member info not available.", ephemeral=True)
-            if not user_has_marketplace_role(member):
-                return await interaction.response.send_message(
-                    "❌ You must have the **Marketplace** role to sell.",
-                    ephemeral=True
-                )
+            g = i.guild
+            m = i.user if isinstance(i.user, discord.Member) else g.get_member(i.user.id)
+            if not m or not has_marketplace_role(m):
+                return await i.response.send_message("Need Marketplace role", ephemeral=True)
 
-        # Check rate limit
         async with aiosqlite.connect(DB_PATH) as db:
-            cutoff = datetime.utcnow() - timedelta(days=1)
-            cur = await db.execute(
-                "SELECT COUNT(1) FROM listings WHERE poster_id = ? AND created_at > ?",
-                (str(interaction.user.id), cutoff.isoformat())
-            )
-            row = await cur.fetchone()
-            cnt = row[0] if row else 0
+            c = await db.execute("SELECT COUNT(*) FROM listings WHERE poster_id=? AND created_at>?", (str(i.user.id), (datetime.utcnow()-timedelta(days=1)).isoformat()))
+            cnt = (await c.fetchone())[0]
             if cnt >= MAX_LISTINGS_PER_USER_PER_DAY:
-                return await interaction.response.send_message(
-                    f"Daily listing limit ({MAX_LISTINGS_PER_USER_PER_DAY}) reached.",
-                    ephemeral=True
-                )
+                return await i.response.send_message(f"Daily limit: {MAX_LISTINGS_PER_USER_PER_DAY}", ephemeral=True)
 
-        mode = self.mode
-        poster = interaction.user
-        anon_name = await get_or_create_anon(poster.id, "seller" if mode == "sell" else "buyer")
-        listing_ref = _generate_listing_ref()
-        product = self.product.value.strip()
-        price = (self.price.value or "").strip()
-        details = (self.details.value or "").strip()
+        ch_id = SELLING_CHANNEL_ID if self.mode == "sell" else BUYING_CHANNEL_ID
+        if not ch_id:
+            return await i.response.send_message("Channel not configured", ephemeral=True)
+        
+        ch = i.guild.get_channel(ch_id)
+        if not ch or not bot_can_send(ch):
+            return await i.response.send_message("Bot can't send there", ephemeral=True)
 
-        target_channel_id = SELLING_CHANNEL_ID if mode == "sell" else BUYING_CHANNEL_ID
-        guild = interaction.guild
-        
-        if not target_channel_id:
-            return await interaction.response.send_message("Marketplace channels not configured.", ephemeral=True)
-        
-        target = guild.get_channel(target_channel_id)
-        if target is None:
-            return await interaction.response.send_message("Marketplace channel not found.", ephemeral=True)
-        
-        if not bot_can_send_in(target):
-            return await interaction.response.send_message("Bot lacks permissions in marketplace channel.", ephemeral=True)
-
-        # Create embed
-        embed = discord.Embed(
-            title=f"Marketplace — {'Selling' if mode == 'sell' else 'Buying'}",
-            color=0xFF531A
-        )
-        embed.add_field(name="Listing ID", value=f"`{listing_ref}`", inline=True)
-        embed.add_field(name=("Seller" if mode == "sell" else "Buyer"), value=f"`{anon_name}`", inline=True)
-        embed.add_field(name="Product", value=product, inline=True)
-        embed.add_field(name="Price/Budget", value=price or "—", inline=True)
-        embed.add_field(name="Details", value=details or "—", inline=False)
-        embed.set_footer(text="Keep trades inside tickets")
-        embed.timestamp = datetime.utcnow()
+        ref = _gen_listing_ref()
+        anon = await get_or_create_anon(i.user.id, self.mode)
+        e = discord.Embed(title=f"{'SELL' if self.mode=='sell' else 'BUY'}", color=0xFF531A)
+        e.add_field(name="ID", value=f"`{ref}`", inline=True)
+        e.add_field(name=("Seller" if self.mode=="sell" else "Buyer"), value=f"`{anon}`", inline=True)
+        e.add_field(name="Product", value=self.product.value, inline=True)
+        e.add_field(name="Price", value=self.price.value or "—", inline=True)
+        e.add_field(name="Details", value=self.details.value or "—", inline=False)
+        e.timestamp = datetime.utcnow()
 
         try:
-            msg = await target.send(embed=embed)
-            view = ListingView(listing_ref=listing_ref)
-            await msg.edit(view=view)
-            
-            # Save to DB
+            msg = await ch.send(embed=e)
+            v = ListingView(ref)
+            await msg.edit(view=v)
             async with aiosqlite.connect(DB_PATH) as db:
-                await db.execute(
-                    "INSERT INTO listings (listing_ref, mode, poster_id, anon_name, product, price, details, channel_id, message_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                    (listing_ref, mode, str(poster.id), anon_name, product, price, details, str(target.id), str(msg.id))
-                )
+                await db.execute("INSERT INTO listings VALUES(NULL,?,?,?,?,?,?,?,?,?,CURRENT_TIMESTAMP)", (ref, self.mode, str(i.user.id), anon, self.product.value, self.price.value or "", self.details.value or "", str(ch.id), str(msg.id)))
                 await db.commit()
-            
-            bot.add_view(view)
-            await interaction.response.send_message(f"Listing posted: {msg.jump_url}", ephemeral=True)
+            bot.add_view(v)
+            await i.response.send_message(f"Posted: {msg.jump_url}", ephemeral=True)
         except Exception as e:
-            log.exception("Failed to post listing: %s", e)
-            await interaction.response.send_message("Failed to post listing.", ephemeral=True)
+            log.exception(f"Post failed: {e}")
+            await i.response.send_message("Failed to post", ephemeral=True)
 
 class ListingView(View):
-    """Buttons on each listing"""
-    def __init__(self, listing_ref: str):
+    def __init__(self, ref):
         super().__init__(timeout=None)
-        self.listing_ref = listing_ref
+        self.ref = ref
 
     @discord.ui.button(label="Contact", style=discord.ButtonStyle.primary)
-    async def contact(self, interaction: discord.Interaction, button: Button):
-        # Fetch listing
+    async def contact(self, i: discord.Interaction, b: Button):
         async with aiosqlite.connect(DB_PATH) as db:
-            cur = await db.execute(
-                "SELECT mode, poster_id FROM listings WHERE listing_ref = ?",
-                (self.listing_ref,)
-            )
-            row = await cur.fetchone()
-        
+            r = await db.execute("SELECT mode, poster_id FROM listings WHERE listing_ref=?", (self.ref,))
+            row = await r.fetchone()
         if not row:
-            return await interaction.response.send_message("Listing not found.", ephemeral=True)
+            return await i.response.send_message("Listing gone", ephemeral=True)
         
-        mode, poster_id_str = row
-        poster_id = int(poster_id_str)
-        clicker_id = interaction.user.id
-
-        # Determine seller/buyer
-        if mode == "sell":
-            seller_id = poster_id
-            buyer_id = clicker_id
-        else:
-            seller_id = clicker_id
-            buyer_id = poster_id
-
+        mode, seller_id = row[0], int(row[1])
+        buyer_id = i.user.id
+        if mode == "buy":
+            seller_id, buyer_id = buyer_id, seller_id
+        
         if seller_id == buyer_id:
-            return await interaction.response.send_message("Cannot contact yourself.", ephemeral=True)
+            return await i.response.send_message("Can't contact yourself", ephemeral=True)
 
-        guild = interaction.guild
-        if not bot_can_create_channel(guild):
-            return await interaction.response.send_message("Bot lacks channel creation permission.", ephemeral=True)
+        if not bot_can_create_channel(i.guild):
+            return await i.response.send_message("Bot can't create channels", ephemeral=True)
 
-        # Check for existing ticket
         async with aiosqlite.connect(DB_PATH) as db:
-            cur = await db.execute(
-                "SELECT channel_id FROM tickets WHERE seller_id = ? AND buyer_id = ? AND listing_ref = ?",
-                (str(seller_id), str(buyer_id), self.listing_ref)
-            )
-            existing = await cur.fetchone()
-        
-        if existing:
-            ch = guild.get_channel(int(existing[0]))
+            r = await db.execute("SELECT channel_id FROM tickets WHERE seller_id=? AND buyer_id=? AND listing_ref=?", (str(seller_id), str(buyer_id), self.ref))
+            ex = await r.fetchone()
+        if ex:
+            ch = i.guild.get_channel(int(ex[0]))
             if ch:
-                return await interaction.response.send_message(f"Ticket exists: {ch.mention}", ephemeral=True)
+                return await i.response.send_message(f"Ticket: {ch.mention}", ephemeral=True)
 
-        # Create ticket channel
         try:
-            overwrites = {guild.default_role: PermissionOverwrite(view_channel=False)}
-            overwrites[seller_id] = PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True)
-            overwrites[buyer_id] = PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True)
+            ow = {i.guild.default_role: PermissionOverwrite(view_channel=False),
+                  seller_id: PermissionOverwrite(view_channel=True, send_messages=True),
+                  buyer_id: PermissionOverwrite(view_channel=True, send_messages=True),
+                  bot.user.id: PermissionOverwrite(view_channel=True, send_messages=True)}
             if MOD_ROLE_ID:
-                overwrites[MOD_ROLE_ID] = PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True, manage_messages=True)
-            overwrites[bot.user.id] = PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True)
+                ow[MOD_ROLE_ID] = PermissionOverwrite(view_channel=True, send_messages=True)
             
-            category = guild.get_channel(TICKET_CATEGORY_ID) if TICKET_CATEGORY_ID else None
-            name = f"ticket-{self.listing_ref.lower()}-{_rand_digits(3)}"
-            channel = await guild.create_text_channel(
-                name=name,
-                overwrites=overwrites,
-                category=category
-            )
+            cat = i.guild.get_channel(TICKET_CATEGORY_ID) if TICKET_CATEGORY_ID else None
+            ch = await i.guild.create_text_channel(f"ticket-{self.ref.lower()}-{_rand_digits(2)}", overwrites=ow, category=cat)
+            tref = _gen_ticket_ref()
             
-            ticket_ref = _generate_ticket_ref()
             async with aiosqlite.connect(DB_PATH) as db:
-                await db.execute(
-                    "INSERT INTO tickets (ticket_ref, channel_id, listing_ref, seller_id, buyer_id, status) VALUES (?, ?, ?, ?, ?, ?)",
-                    (ticket_ref, str(channel.id), self.listing_ref, str(seller_id), str(buyer_id), "Waiting")
-                )
+                await db.execute("INSERT INTO tickets VALUES(NULL,?,?,?,?,?,?,NULL,CURRENT_TIMESTAMP)", (tref, str(ch.id), self.ref, str(seller_id), str(buyer_id), "Waiting"))
                 await db.commit()
             
-            # Send ticket info
-            embed = discord.Embed(title="Trade Ticket", color=0x835AF1)
-            embed.add_field(name="Listing ID", value=f"`{self.listing_ref}`", inline=True)
-            embed.add_field(name="Status", value="Waiting for Trade", inline=False)
-            embed.set_footer(text=f"Ticket: {ticket_ref}")
+            e = discord.Embed(title="Trade Ticket", color=0x835AF1)
+            e.add_field(name="Listing", value=f"`{self.ref}`", inline=True)
+            e.add_field(name="Status", value="Waiting", inline=False)
+            e.set_footer(text=f"Ticket: {tref}")
             
-            controls = TicketControls(ticket_ref)
-            await channel.send(content=f"<@{seller_id}> <@{buyer_id}>", embed=embed, view=controls)
-            bot.add_view(controls)
+            tc = TicketControls(tref)
+            await ch.send(content=f"<@{seller_id}> <@{buyer_id}>", embed=e, view=tc)
+            bot.add_view(tc)
             
-            await interaction.response.send_message(f"Ticket created: {channel.mention}", ephemeral=True)
+            await i.response.send_message(f"Ticket: {ch.mention}", ephemeral=True)
         except Exception as e:
-            log.exception("Failed to create ticket: %s", e)
-            await interaction.response.send_message("Failed to create ticket.", ephemeral=True)
+            log.exception(f"Ticket create failed: {e}")
+            await i.response.send_message("Failed", ephemeral=True)
 
     @discord.ui.button(label="Report", style=discord.ButtonStyle.danger)
-    async def report(self, interaction: discord.Interaction, button: Button):
-        await interaction.response.send_message("Use Report Scammer in the ticket or DM staff.", ephemeral=True)
+    async def report(self, i: discord.Interaction, b: Button):
+        await i.response.send_message("Use Report in ticket", ephemeral=True)
 
 class TicketControls(View):
-    """Buttons in ticket channel"""
-    def __init__(self, ticket_ref: str):
+    def __init__(self, ref):
         super().__init__(timeout=None)
-        self.ticket_ref = ticket_ref
+        self.ref = ref
 
     @discord.ui.button(label="Close", style=discord.ButtonStyle.danger)
-    async def close_ticket(self, interaction: discord.Interaction, btn: Button):
-        channel = interaction.channel
+    async def close(self, i: discord.Interaction, b: Button):
         try:
-            for target, ow in list(channel.overwrites.items()):
-                try:
-                    target_id = target.id
-                except:
-                    target_id = target
-                if target_id != bot.user.id and (not MOD_ROLE_ID or target_id != MOD_ROLE_ID):
-                    await channel.set_permissions(
-                        target,
-                        overwrite=PermissionOverwrite(
-                            view_channel=ow.view_channel,
-                            send_messages=False,
-                            read_message_history=ow.read_message_history
-                        )
-                    )
-            
+            for t in list(i.channel.overwrites.keys()):
+                tid = t.id if hasattr(t, 'id') else t
+                if tid != bot.user.id and (not MOD_ROLE_ID or tid != MOD_ROLE_ID):
+                    await i.channel.set_permissions(t, send_messages=False)
             async with aiosqlite.connect(DB_PATH) as db:
-                await db.execute("UPDATE tickets SET status = ? WHERE channel_id = ?", ("Closed", str(channel.id)))
+                await db.execute("UPDATE tickets SET status=? WHERE channel_id=?", ("Closed", str(i.channel.id)))
                 await db.commit()
-            
-            await interaction.response.send_message("Ticket closed.", ephemeral=True)
+            await i.response.send_message("Closed", ephemeral=True)
         except Exception as e:
-            log.exception("Close failed: %s", e)
-            await interaction.response.send_message("Failed to close ticket.", ephemeral=True)
+            log.exception(f"Close failed: {e}")
 
     @discord.ui.button(label="Delete", style=discord.ButtonStyle.secondary)
-    async def delete_ticket(self, interaction: discord.Interaction, btn: Button):
-        member = interaction.user
-        if not MOD_ROLE_ID or not any(r.id == MOD_ROLE_ID for r in member.roles):
-            return await interaction.response.send_message("Staff only.", ephemeral=True)
-        
-        channel = interaction.channel
+    async def delete(self, i: discord.Interaction, b: Button):
+        if not MOD_ROLE_ID or not any(r.id == MOD_ROLE_ID for r in i.user.roles):
+            return await i.response.send_message("Staff only", ephemeral=True)
         try:
             async with aiosqlite.connect(DB_PATH) as db:
-                await db.execute("DELETE FROM tickets WHERE channel_id = ?", (str(channel.id),))
+                await db.execute("DELETE FROM tickets WHERE channel_id=?", (str(i.channel.id),))
                 await db.commit()
-            
-            await interaction.response.send_message("Deleting...", ephemeral=True)
-            await channel.delete()
+            await i.channel.delete()
         except Exception as e:
-            log.exception("Delete failed: %s", e)
-            await interaction.response.send_message("Failed to delete.", ephemeral=True)
+            log.exception(f"Delete failed: {e}")
 
     @discord.ui.button(label="Report Scammer", style=discord.ButtonStyle.danger)
-    async def report_scammer(self, interaction: discord.Interaction, btn: Button):
-        channel = interaction.channel
+    async def report_scam(self, i: discord.Interaction, b: Button):
         async with aiosqlite.connect(DB_PATH) as db:
-            cur = await db.execute(
-                "SELECT ticket_ref, listing_ref FROM tickets WHERE channel_id = ?",
-                (str(channel.id),)
-            )
-            row = await cur.fetchone()
-            ticket_ref = row[0] if row else None
-            listing_ref = row[1] if row else None
-        
-        report_ref = _generate_report_ref()
+            r = await db.execute("SELECT ticket_ref, listing_ref FROM tickets WHERE channel_id=?", (str(i.channel.id),))
+            row = await r.fetchone()
+        rref = _gen_report_ref()
         try:
             async with aiosqlite.connect(DB_PATH) as db:
-                await db.execute(
-                    "INSERT INTO reports (report_ref, ticket_ref, listing_ref, reporter_id, reason) VALUES (?, ?, ?, ?, ?)",
-                    (report_ref, ticket_ref, listing_ref, str(interaction.user.id), "Reported via ticket")
-                )
+                await db.execute("INSERT INTO reports VALUES(NULL,?,?,?,?,?,CURRENT_TIMESTAMP)", (rref, row[0] if row else None, row[1] if row else None, str(i.user.id), "Scammer"))
                 await db.commit()
-            
             if SCAM_LOG_CHANNEL_ID:
-                guild = interaction.guild
-                log_chan = guild.get_channel(SCAM_LOG_CHANNEL_ID)
-                if log_chan and bot_can_send_in(log_chan):
-                    embed = discord.Embed(
-                        title="Scam Report",
-                        description=f"Report `{report_ref}` for ticket `{ticket_ref}` by <@{interaction.user.id}>",
-                        color=0xE74C3C
-                    )
-                    await log_chan.send(embed=embed)
-            
-            await interaction.response.send_message("Report submitted.", ephemeral=True)
+                lch = i.guild.get_channel(SCAM_LOG_CHANNEL_ID)
+                if lch and bot_can_send(lch):
+                    await lch.send(f"Report {rref}: <@{i.user.id}>")
+            await i.response.send_message("Reported", ephemeral=True)
         except Exception as e:
-            log.exception("Report failed: %s", e)
-            await interaction.response.send_message("Failed to report.", ephemeral=True)
+            log.exception(f"Report failed: {e}")
 
     @discord.ui.button(label="Claim", style=discord.ButtonStyle.primary)
-    async def claim_ticket(self, interaction: discord.Interaction, btn: Button):
-        member = interaction.user
-        if not MOD_ROLE_ID or not any(r.id == MOD_ROLE_ID for r in member.roles):
-            return await interaction.response.send_message("Staff only.", ephemeral=True)
-        
-        channel = interaction.channel
+    async def claim(self, i: discord.Interaction, b: Button):
+        if not MOD_ROLE_ID or not any(r.id == MOD_ROLE_ID for r in i.user.roles):
+            return await i.response.send_message("Staff only", ephemeral=True)
         try:
             async with aiosqlite.connect(DB_PATH) as db:
-                await db.execute(
-                    "UPDATE tickets SET status = ?, claimer_id = ? WHERE channel_id = ?",
-                    ("Claimed", str(member.id), str(channel.id))
-                )
+                await db.execute("UPDATE tickets SET status=?, claimer_id=? WHERE channel_id=?", ("Claimed", str(i.user.id), str(i.channel.id)))
                 await db.commit()
-            
-            await interaction.response.send_message(f"Claimed by {member.mention}.", ephemeral=True)
+            await i.response.send_message(f"Claimed by {i.user.mention}", ephemeral=True)
         except Exception as e:
-            log.exception("Claim failed: %s", e)
-            await interaction.response.send_message("Failed to claim.", ephemeral=True)
-
-# ============================================================================
-# BOT EVENTS
-# ============================================================================
+            log.exception(f"Claim failed: {e}")
 
 @bot.event
 async def on_ready():
-    """Bot startup"""
-    log.info("=" * 70)
-    log.info("✅ BOT READY")
-    log.info(f"Bot: {bot.user} ({bot.user.id})")
-    log.info(f"Guild ID: {GUILD_ID}")
-    log.info("=" * 70)
+    log.info("="*70)
+    log.info(f"✅ BOT READY: {bot.user}")
+    log.info(f"Guild: {GUILD_ID}")
+    log.info("="*70)
     
-    # Initialize database
     await init_db()
-    
-    # Add persistent views
     bot.add_view(DashboardView())
     
-    # Re-register listing views from database
     try:
         async with aiosqlite.connect(DB_PATH) as db:
-            cur = await db.execute("SELECT listing_ref FROM listings")
-            rows = await cur.fetchall()
-        for (listing_ref,) in rows:
-            view = ListingView(listing_ref=listing_ref)
-            bot.add_view(view)
+            r = await db.execute("SELECT listing_ref FROM listings")
+            rows = await r.fetchall()
+        for (ref,) in rows:
+            bot.add_view(ListingView(ref))
         log.info(f"Re-registered {len(rows)} listing views")
     except Exception as e:
-        log.exception(f"Failed to re-register views: {e}")
+        log.exception(f"View registration failed: {e}")
     
-    # Sync commands
     try:
         synced = await bot.tree.sync(guild=discord.Object(id=GUILD_ID))
-        log.info(f"✅ COMMANDS SYNCED: {len(synced)} commands")
+        log.info(f"✅ SYNCED {len(synced)} COMMANDS:")
         for cmd in synced:
             log.info(f"   ✓ /{cmd.name}")
     except discord.Forbidden:
-        log.error("❌ FORBIDDEN: Bot lacks permission to sync commands")
-        log.error("   Check: Discord Dev Portal > App > Installation > Scopes > applications.commands")
-    except discord.HTTPException as e:
-        log.error(f"❌ HTTP ERROR: {e}")
+        log.error("❌ FORBIDDEN - Check Dev Portal > Installation > Scopes > applications.commands")
     except Exception as e:
-        log.exception(f"❌ SYNC ERROR: {e}")
+        log.exception(f"❌ SYNC FAILED: {e}")
 
 @bot.event
-async def on_raw_message_delete(payload: discord.RawMessageDeleteEvent):
-    """Handle listing message deletion"""
+async def on_raw_message_delete(p):
     try:
         async with aiosqlite.connect(DB_PATH) as db:
-            await db.execute(
-                "DELETE FROM listings WHERE message_id = ? AND channel_id = ?",
-                (str(payload.message_id), str(payload.channel_id))
-            )
+            await db.execute("DELETE FROM listings WHERE message_id=? AND channel_id=?", (str(p.message_id), str(p.channel_id)))
             await db.commit()
-        log.info(f"Deleted listing for message {payload.message_id}")
     except Exception as e:
-        log.exception(f"Failed to handle message delete: {e}")
-
-# ============================================================================
-# SLASH COMMANDS
-# ============================================================================
+        log.exception(f"Delete handler failed: {e}")
 
 @bot.tree.command(name="dashboard", description="Post marketplace dashboard")
-async def cmd_dashboard(interaction: discord.Interaction):
-    """Post the dashboard"""
-    if not interaction.user.guild_permissions.manage_guild:
-        return await interaction.response.send_message("Manager only.", ephemeral=True)
-    
-    embed = discord.Embed(
-        title="📦 Marketplace",
-        description="Use buttons to create listings or read info.",
-        color=0x2F3136
-    )
-    embed.add_field(
-        name="Safe Trading",
-        value="Keep trades in tickets. Never send payment outside.",
-        inline=False
-    )
-    view = DashboardView()
-    await interaction.response.send_message(embed=embed, view=view)
+async def dashboard(i: discord.Interaction):
+    if not i.user.guild_permissions.manage_guild:
+        return await i.response.send_message("Manager only", ephemeral=True)
+    e = discord.Embed(title="📦 Marketplace", description="Create listings here", color=0x2F3136)
+    e.add_field(name="Keep Safe", value="Use tickets, never pay outside", inline=False)
+    v = DashboardView()
+    await i.response.send_message(embed=e, view=v)
 
 @bot.tree.command(name="sell", description="Create selling listing")
-async def cmd_sell(interaction: discord.Interaction):
-    """Open selling modal"""
-    guild = interaction.guild
-    member = interaction.user if isinstance(interaction.user, discord.Member) else guild.get_member(interaction.user.id)
-    
-    if not member:
-        return await interaction.response.send_message("Member info not available.", ephemeral=True)
-    
-    if not user_has_marketplace_role(member):
-        return await interaction.response.send_message(
-            "❌ Need **Marketplace** role to sell.",
-            ephemeral=True
-        )
-    
-    await interaction.response.send_modal(ListingModal(mode="sell"))
+async def sell(i: discord.Interaction):
+    g = i.guild
+    m = i.user if isinstance(i.user, discord.Member) else g.get_member(i.user.id)
+    if not m or not has_marketplace_role(m):
+        return await i.response.send_message("Need Marketplace role", ephemeral=True)
+    await i.response.send_modal(ListingModal("sell"))
 
 @bot.tree.command(name="buy", description="Create buying listing")
-async def cmd_buy(interaction: discord.Interaction):
-    """Open buying modal"""
-    await interaction.response.send_modal(ListingModal(mode="buy"))
-
-# ============================================================================
-# MAIN
-# ============================================================================
+async def buy(i: discord.Interaction):
+    await i.response.send_modal(ListingModal("buy"))
 
 if __name__ == "__main__":
-    log.info("Starting bot...")
-    try:
-        bot.run(TOKEN)
-    except Exception as e:
-        log.exception(f"Bot crashed: {e}")
+    bot.run(TOKEN)
