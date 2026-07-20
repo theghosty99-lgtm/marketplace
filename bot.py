@@ -587,36 +587,38 @@ async def on_ready():
         for (listing_ref,) in rows:
             view = ListingView(listing_ref=listing_ref)
             bot.add_view(view)
-        log.info(f"✅ Re-registered {len(rows)} listing views")
     except Exception as e:
         log.exception(f"Failed to re-register views: {e}")
-    
-# Sync commands to guild
-try:
-    guild = discord.Object(id=GUILD_ID)
 
-    # Copy global commands to this guild
-    bot.tree.copy_global_to(guild=guild)
+    # Sync commands to guild
+    try:
+        guild = discord.Object(id=GUILD_ID)
 
-    # Show registered commands before syncing
-    log.info("=== REGISTERED COMMANDS ===")
-    for cmd in bot.tree.get_commands():
-        log.info(f"Found command: {cmd.name}")
-    log.info("===========================")
+        # Copy global commands to this guild
+        bot.tree.copy_global_to(guild=guild)
 
-    # Sync commands
-    synced = await bot.tree.sync(guild=guild)
+        # Show registered commands before syncing
+        log.info("=== REGISTERED COMMANDS ===")
+        for cmd in bot.tree.get_commands():
+            log.info(f"Found command: {cmd.name}")
+        log.info("===========================")
 
-    log.info(f"✅ SYNCED {len(synced)} COMMANDS TO GUILD:")
-    for cmd in synced:
-        log.info(f"   ✓ /{cmd.name}")
+        # Sync commands
+        synced = await bot.tree.sync(guild=guild)
 
-except discord.Forbidden:
-    log.error("❌ FORBIDDEN - Bot lacks permission to sync commands")
-    log.error("   Fix: Discord Dev Portal > Installation > Scopes > applications.commands")
+        log.info(f"✅ SYNCED {len(synced)} COMMANDS TO GUILD:")
+        for cmd in synced:
+            log.info(f"   ✓ /{cmd.name}")
 
-except discord.HTTPException as e:
-    log.error(f"❌ HTTP ERROR: {e}")
+    except discord.Forbidden:
+        log.error("❌ FORBIDDEN - Bot lacks permission to sync commands")
+        log.error("   Fix: Discord Dev Portal > Installation > Scopes > applications.commands")
+
+    except discord.HTTPException as e:
+        log.error(f"❌ HTTP ERROR: {e}")
+
+    except Exception as e:
+        log.exception(f"❌ COMMAND SYNC FAILED: {e}")
 
 except Exception as e:
     log.exception(f"❌ COMMAND SYNC FAILED: {e}")
