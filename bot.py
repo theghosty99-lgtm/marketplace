@@ -598,7 +598,13 @@ try:
     # Copy global commands to this guild
     bot.tree.copy_global_to(guild=guild)
 
-    # Sync them
+    # Show registered commands before syncing
+    log.info("=== REGISTERED COMMANDS ===")
+    for cmd in bot.tree.get_commands():
+        log.info(f"Found command: {cmd.name}")
+    log.info("===========================")
+
+    # Sync commands
     synced = await bot.tree.sync(guild=guild)
 
     log.info(f"✅ SYNCED {len(synced)} COMMANDS TO GUILD:")
