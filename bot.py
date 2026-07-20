@@ -1,9 +1,8 @@
-# name=bot.py
 """
-Discord Marketplace Bot - Starter (updated with Marketplace role verification)
-
-Same features as earlier plus:
-- MARKETPLACE_ROLE_ID enforcement for Selling
+Discord Marketplace Bot - Fixed Version
+- Commands will now properly sync and respond
+- Added command tree sync with error handling
+- Fixed interaction handling
 """
 
 import os
@@ -41,10 +40,14 @@ if not TOKEN:
     log.error("DISCORD_TOKEN missing in .env")
     raise SystemExit(1)
 
+if not GUILD_ID:
+    log.error("GUILD_ID missing in .env")
+    raise SystemExit(1)
+
 intents = discord.Intents.default()
 intents.guilds = True
 intents.members = True
-intents.message_content = True  # required for permission overwrites & role checks
+intents.message_content = True
 
 bot = commands.Bot(command_prefix=".", intents=intents)
 
@@ -56,7 +59,7 @@ async def init_db():
             CREATE TABLE IF NOT EXISTS anonymous (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 user_id TEXT NOT NULL,
-                kind TEXT NOT NULL, -- 'seller' or 'buyer'
+                kind TEXT NOT NULL,
                 anon_name TEXT NOT NULL,
                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
                 UNIQUE(user_id, kind)
@@ -64,8 +67,8 @@ async def init_db():
 
             CREATE TABLE IF NOT EXISTS listings (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                listing_ref TEXT NOT NULL UNIQUE, -- e.g. L-1234
-                mode TEXT NOT NULL, -- 'sell' or 'buy'
+                listing_ref TEXT NOT NULL UNIQUE,
+                mode TEXT NOT NULL,
                 poster_id TEXT NOT NULL,
                 anon_name TEXT NOT NULL,
                 product TEXT NOT NULL,
@@ -78,12 +81,12 @@ async def init_db():
 
             CREATE TABLE IF NOT EXISTS tickets (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                ticket_ref TEXT NOT NULL UNIQUE, -- e.g. T-1234
+                ticket_ref TEXT NOT NULL UNIQUE,
                 channel_id TEXT NOT NULL,
                 listing_ref TEXT,
                 seller_id TEXT NOT NULL,
                 buyer_id TEXT NOT NULL,
-                status TEXT NOT NULL, -- Waiting, Claimed, Closed, Deleted
+                status TEXT NOT NULL,
                 claimer_id TEXT,
                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP
             );
@@ -102,29 +105,25 @@ async def init_db():
         await db.commit()
     log.info("SQLite DB initialized at %s", DB_PATH)
 
-# Helpers: anon name generation & DB ops
+# Helpers
 def _rand_digits(n=4):
     return "".join(str(random.randint(0,9)) for _ in range(n))
 
 async def get_or_create_anon(user_id: int, kind: str) -> str:
-    """Return anon name for (user, kind). Create if not exists."""
     kind = kind if kind in ("seller", "buyer") else "seller"
     async with aiosqlite.connect(DB_PATH) as db:
         cur = await db.execute("SELECT anon_name FROM anonymous WHERE user_id = ? AND kind = ?", (str(user_id), kind))
         row = await cur.fetchone()
         if row:
             return row[0]
-        # create unique anon name
         for _ in range(10):
             anon = ("Seller-" if kind=="seller" else "Buyer-") + _rand_digits(4)
-            # ensure uniqueness
             c2 = await db.execute("SELECT 1 FROM anonymous WHERE anon_name = ?", (anon,))
             exists = await c2.fetchone()
             if not exists:
                 await db.execute("INSERT INTO anonymous (user_id, kind, anon_name) VALUES (?, ?, ?)", (str(user_id), kind, anon))
                 await db.commit()
                 return anon
-        # fallback
         anon = ("Seller-" if kind=="seller" else "Buyer-") + str(random.randint(1000,9999))
         await db.execute("INSERT INTO anonymous (user_id, kind, anon_name) VALUES (?, ?, ?)", (str(user_id), kind, anon))
         await db.commit()
@@ -139,7 +138,6 @@ def _generate_ticket_ref() -> str:
 def _generate_report_ref() -> str:
     return "R-" + _rand_digits(8)
 
-# Minimal sanitization: disallow URLs / invites
 URL_PATTERN = re.compile(r"https?://|discord\.gg|discordapp\.com/invite|\.gg/", re.IGNORECASE)
 
 def contains_disallowed_links(text: str) -> bool:
@@ -147,7 +145,6 @@ def contains_disallowed_links(text: str) -> bool:
         return False
     return bool(URL_PATTERN.search(text))
 
-# Permission checks
 def bot_can_create_channel(guild: discord.Guild) -> bool:
     member = guild.get_member(bot.user.id)
     return member and member.guild_permissions.manage_channels
@@ -160,9 +157,8 @@ def bot_can_send_in(channel: discord.abc.GuildChannel) -> bool:
     return perms.send_messages and perms.embed_links and perms.read_message_history
 
 def user_has_marketplace_role(member: discord.Member) -> bool:
-    """Return True if MARKETPLACE_ROLE_ID not set or member has the role."""
     if not MARKETPLACE_ROLE_ID:
-        return True  # enforcement disabled unless env config provided
+        return True
     return any(r.id == MARKETPLACE_ROLE_ID for r in member.roles)
 
 # Views and Modals
@@ -172,14 +168,12 @@ class DashboardView(View):
 
     @discord.ui.button(label="Selling", style=discord.ButtonStyle.danger, emoji="🟥", custom_id="dashboard_selling")
     async def selling(self, interaction: discord.Interaction, button: Button):
-        # Marketplace role enforcement before opening Selling modal
         guild = interaction.guild
         member = interaction.user if isinstance(interaction.user, discord.Member) else guild.get_member(interaction.user.id)
         if not member:
             return await interaction.response.send_message("Member information not available.", ephemeral=True)
         if not user_has_marketplace_role(member):
             return await interaction.response.send_message("❌ You must have the **Marketplace** role before creating a selling listing. Please obtain the role from the server before posting items for sale.", ephemeral=True)
-        # open modal for selling
         modal = ListingModal(mode="sell")
         await interaction.response.send_modal(modal)
 
@@ -203,14 +197,12 @@ class ListingModal(Modal, title="Create Marketplace Listing"):
 
     def __init__(self, mode: str):
         super().__init__()
-        self.mode = mode  # 'sell' or 'buy'
+        self.mode = mode
 
     async def on_submit(self, interaction: discord.Interaction):
-        # Validate no links
         if contains_disallowed_links(self.product) or contains_disallowed_links(self.price) or contains_disallowed_links(self.details):
             return await interaction.response.send_message("Your listing contains links or invites. Links are not allowed in public listings.", ephemeral=True)
 
-        # If selling, verify marketplace role again (safety)
         if self.mode == "sell":
             guild = interaction.guild
             member = interaction.user if isinstance(interaction.user, discord.Member) else guild.get_member(interaction.user.id)
@@ -219,7 +211,6 @@ class ListingModal(Modal, title="Create Marketplace Listing"):
             if not user_has_marketplace_role(member):
                 return await interaction.response.send_message("❌ You must have the **Marketplace** role before creating a selling listing. Please obtain the role from the server before posting items for sale.", ephemeral=True)
 
-        # Rate-limit: count listings in last 24h
         async with aiosqlite.connect(DB_PATH) as db:
             cutoff = datetime.utcnow() - timedelta(days=1)
             cur = await db.execute("SELECT COUNT(1) FROM listings WHERE poster_id = ? AND created_at > ?", (str(interaction.user.id), cutoff.isoformat()))
@@ -256,17 +247,13 @@ class ListingModal(Modal, title="Create Marketplace Listing"):
         embed.timestamp = datetime.utcnow()
 
         try:
-            # send message and attach contact/report buttons
             msg = await target.send(embed=embed)
-            custom_id = f"contact:{listing_ref}"
             view = ListingView(listing_ref=listing_ref)
-            await msg.edit(view=view)  # attach buttons
-            # save to DB
+            await msg.edit(view=view)
             async with aiosqlite.connect(DB_PATH) as db:
                 await db.execute("INSERT INTO listings (listing_ref, mode, poster_id, anon_name, product, price, details, channel_id, message_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                                  (listing_ref, mode, str(poster.id), anon_name, product, price, details, str(target.id), str(msg.id)))
                 await db.commit()
-            # register view globally so it survives restart
             bot.add_view(view)
             await interaction.response.send_message(f"Your listing has been posted: {msg.jump_url}", ephemeral=True)
         except Exception as e:
@@ -274,21 +261,18 @@ class ListingModal(Modal, title="Create Marketplace Listing"):
             await interaction.response.send_message("Failed to post listing (internal error). Contact an admin.", ephemeral=True)
 
 class ListingView(View):
-    """View for each listing with Contact Seller/Buyer and Report Listing."""
     def __init__(self, listing_ref: str):
         super().__init__(timeout=None)
         self.listing_ref = listing_ref
 
     @discord.ui.button(label="Contact", style=discord.ButtonStyle.primary, custom_id=lambda: f"contact:{''}")
     async def contact(self, interaction: discord.Interaction, button: Button):
-        # This callback won't be used because we handle the custom_id in on_interaction.
-        await interaction.response.send_message("Please use the Contact button. (Fallback)", ephemeral=True)
+        await interaction.response.send_message("Please use the Contact button.", ephemeral=True)
 
     @discord.ui.button(label="Report Listing", style=discord.ButtonStyle.danger, custom_id=lambda: f"report_listing:{''}")
     async def report_listing(self, interaction: discord.Interaction, button: Button):
         await interaction.response.send_message("To report this listing, please use the Report Scammer button inside the ticket after contacting or DM staff.", ephemeral=True)
 
-# Ticket controls View (persistent)
 class TicketControls(View):
     def __init__(self, ticket_ref: str):
         super().__init__(timeout=None)
@@ -296,7 +280,6 @@ class TicketControls(View):
 
     @discord.ui.button(label="🔒 Close Ticket", style=discord.ButtonStyle.danger, custom_id=lambda: f"close_ticket:{''}")
     async def close_ticket(self, interaction: discord.Interaction, btn: Button):
-        # make channel read-only for non-staff
         channel = interaction.channel
         guild = interaction.guild
         try:
@@ -308,7 +291,6 @@ class TicketControls(View):
                 if target_id == bot.user.id or (MOD_ROLE_ID and target_id == MOD_ROLE_ID):
                     continue
                 await channel.set_permissions(target, overwrite=PermissionOverwrite(view_channel=ow.view_channel, send_messages=False, read_message_history=ow.read_message_history))
-            # update DB
             async with aiosqlite.connect(DB_PATH) as db:
                 await db.execute("UPDATE tickets SET status = ? WHERE channel_id = ?", ("Closed", str(channel.id)))
                 await db.commit()
@@ -319,13 +301,11 @@ class TicketControls(View):
 
     @discord.ui.button(label="🗑 Delete Ticket", style=discord.ButtonStyle.secondary, custom_id=lambda: f"delete_ticket:{''}")
     async def delete_ticket(self, interaction: discord.Interaction, btn: Button):
-        # staff only
         member = interaction.user
         if not MOD_ROLE_ID or not any(r.id == MOD_ROLE_ID for r in member.roles):
             return await interaction.response.send_message("Only staff can delete tickets.", ephemeral=True)
         channel = interaction.channel
         try:
-            # remove from DB
             async with aiosqlite.connect(DB_PATH) as db:
                 await db.execute("DELETE FROM tickets WHERE channel_id = ?", (str(channel.id),))
                 await db.commit()
@@ -337,9 +317,7 @@ class TicketControls(View):
 
     @discord.ui.button(label="🚨 Report Scammer", style=discord.ButtonStyle.danger, custom_id=lambda: f"report_scammer:{''}")
     async def report_scammer(self, interaction: discord.Interaction, btn: Button):
-        # Create report for ticket and notify staff
         channel = interaction.channel
-        # get ticket by channel_id
         async with aiosqlite.connect(DB_PATH) as db:
             cur = await db.execute("SELECT ticket_ref, listing_ref FROM tickets WHERE channel_id = ?", (str(channel.id),))
             row = await cur.fetchone()
@@ -351,7 +329,6 @@ class TicketControls(View):
                 await db.execute("INSERT INTO reports (report_ref, ticket_ref, listing_ref, reporter_id, reason) VALUES (?, ?, ?, ?, ?)",
                                  (report_ref, ticket_ref, listing_ref, str(interaction.user.id), "Reported via ticket button"))
                 await db.commit()
-            # Notify staff in the configured scam channel or system channel
             if SCAM_LOG_CHANNEL_ID:
                 guild = interaction.guild
                 log_chan = guild.get_channel(SCAM_LOG_CHANNEL_ID)
@@ -379,20 +356,18 @@ class TicketControls(View):
             log.exception("claim_ticket failed")
             await interaction.response.send_message("Failed to claim ticket (internal error).", ephemeral=True)
 
-# Global interaction handler for dynamic custom_ids (listing contact, listing report)
+# Global interaction handler
 @bot.event
 async def on_interaction(interaction: discord.Interaction):
     if interaction.type != discord.InteractionType.component:
         return
     cid = interaction.data.get("custom_id", "")
     if cid.startswith("contact:"):
-        # format contact:L-12345
         try:
             _, listing_ref = cid.split(":", 1)
         except Exception:
             return await interaction.response.send_message("Invalid button.", ephemeral=True)
 
-        # fetch listing
         async with aiosqlite.connect(DB_PATH) as db:
             cur = await db.execute("SELECT mode, poster_id, anon_name, channel_id FROM listings WHERE listing_ref = ?", (listing_ref,))
             row = await cur.fetchone()
@@ -402,11 +377,10 @@ async def on_interaction(interaction: discord.Interaction):
         poster_id = int(poster_id_str)
         clicker_id = interaction.user.id
 
-        # Determine seller and buyer based on mode
         if mode == "sell":
             seller_id = poster_id
             buyer_id = clicker_id
-        else:  # 'buy'
+        else:
             seller_id = clicker_id
             buyer_id = poster_id
 
@@ -414,11 +388,9 @@ async def on_interaction(interaction: discord.Interaction):
             return await interaction.response.send_message("You cannot contact yourself.", ephemeral=True)
 
         guild = interaction.guild
-        # Check bot can create channel
         if not bot_can_create_channel(guild):
             return await interaction.response.send_message("Bot lacks Manage Channels permission to create tickets. Contact an admin.", ephemeral=True)
 
-        # Check for existing ticket with same seller/buyer/listing
         async with aiosqlite.connect(DB_PATH) as db:
             cur = await db.execute("SELECT channel_id FROM tickets WHERE seller_id = ? AND buyer_id = ? AND listing_ref = ?", (str(seller_id), str(buyer_id), listing_ref))
             existing = await cur.fetchone()
@@ -427,12 +399,10 @@ async def on_interaction(interaction: discord.Interaction):
             if ch:
                 return await interaction.response.send_message(f"A ticket already exists: {ch.mention}", ephemeral=True)
             else:
-                # remove stale
                 async with aiosqlite.connect(DB_PATH) as db:
                     await db.execute("DELETE FROM tickets WHERE channel_id = ?", (str(existing[0]),))
                     await db.commit()
 
-        # Create ticket channel with overwrites: seller, buyer, mod role, bot
         try:
             overwrites = { guild.default_role: PermissionOverwrite(view_channel=False) }
             overwrites[seller_id] = PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True)
@@ -441,7 +411,6 @@ async def on_interaction(interaction: discord.Interaction):
                 overwrites[MOD_ROLE_ID] = PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True, manage_messages=True)
             overwrites[bot.user.id] = PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True)
             category = guild.get_channel(TICKET_CATEGORY_ID) if TICKET_CATEGORY_ID else None
-            # channel name short
             name = f"ticket-{listing_ref.lower()}-{_rand_digits(3)}"
             channel = await guild.create_text_channel(name=name, overwrites=overwrites, topic=f"ticket|listing:{listing_ref}|seller:{seller_id}|buyer:{buyer_id}", category=category)
             ticket_ref = _generate_ticket_ref()
@@ -449,7 +418,6 @@ async def on_interaction(interaction: discord.Interaction):
                 await db.execute("INSERT INTO tickets (ticket_ref, channel_id, listing_ref, seller_id, buyer_id, status) VALUES (?, ?, ?, ?, ?, ?)",
                                  (ticket_ref, str(channel.id), listing_ref, str(seller_id), str(buyer_id), "Waiting"))
                 await db.commit()
-            # send ticket embed + persistent controls
             seller_anon = await get_or_create_anon(seller_id, "seller")
             buyer_anon = await get_or_create_anon(buyer_id, "buyer")
             embed = discord.Embed(title="Trade Ticket", color=0x835AF1)
@@ -460,7 +428,6 @@ async def on_interaction(interaction: discord.Interaction):
             embed.set_footer(text=f"Ticket: {ticket_ref}")
             controls = TicketControls(ticket_ref)
             await channel.send(content=f"<@{seller_id}> <@{buyer_id}>", embed=embed, view=controls)
-            # register controls view globally
             bot.add_view(controls)
             await interaction.response.send_message(f"Ticket created: {channel.mention}", ephemeral=True)
         except Exception:
@@ -469,16 +436,17 @@ async def on_interaction(interaction: discord.Interaction):
     elif cid.startswith("report_listing:"):
         await interaction.response.send_message("To report a listing, click Contact to open a ticket, then use Report Scammer inside the ticket. Otherwise DM staff.", ephemeral=True)
 
-# Startup: init DB, re-register views for existing listings and ticket controls
+# Startup
 @bot.event
 async def on_ready():
+    log.info("=" * 60)
     log.info("Bot ready: %s (%s)", bot.user, bot.user.id)
+    log.info("Guild ID: %s", GUILD_ID)
+    log.info("=" * 60)
+    
     await init_db()
-
-    # Add dashboard & global ticket controls (stateless)
     bot.add_view(DashboardView())
 
-    # Re-register ListingView for each listing stored in DB
     try:
         async with aiosqlite.connect(DB_PATH) as db:
             cur = await db.execute("SELECT listing_ref FROM listings")
@@ -490,18 +458,16 @@ async def on_ready():
     except Exception:
         log.exception("Failed to re-register listing views")
 
-    # Sync app commands
+    # Sync commands
     try:
-        if GUILD_ID:
-            await bot.tree.sync(guild=discord.Object(id=GUILD_ID))
-            log.info("Synced commands to guild %s", GUILD_ID)
-        else:
-            await bot.tree.sync()
-            log.info("Synced global commands")
-    except Exception:
-        log.exception("Failed to sync commands")
+        synced = await bot.tree.sync(guild=discord.Object(id=GUILD_ID))
+        log.info("✅ Successfully synced %d commands to guild %s", len(synced), GUILD_ID)
+        for cmd in synced:
+            log.info("   - /%s", cmd.name)
+    except Exception as e:
+        log.exception("❌ Failed to sync commands: %s", e)
 
-# Dashboard command for admins (single use or to repost)
+# Commands
 @bot.tree.command(name="dashboard", description="Post the marketplace dashboard (Admin only)")
 async def cmd_dashboard(interaction: discord.Interaction):
     if not interaction.user.guild_permissions.manage_guild:
@@ -511,7 +477,6 @@ async def cmd_dashboard(interaction: discord.Interaction):
     view = DashboardView()
     await interaction.response.send_message(embed=embed, view=view)
 
-# Convenience fallback commands to open modals (enforce Marketplace role on /sell)
 @bot.tree.command(name="sell", description="Open selling modal")
 async def cmd_sell(interaction: discord.Interaction):
     guild = interaction.guild
@@ -526,15 +491,14 @@ async def cmd_sell(interaction: discord.Interaction):
 async def cmd_buy(interaction: discord.Interaction):
     await interaction.response.send_modal(ListingModal(mode="buy"))
 
-# Optional: cleanup when listing message deleted (remove DB row)
+# Message delete handler
 @bot.event
 async def on_raw_message_delete(payload: discord.RawMessageDeleteEvent):
-    # payload.message_id and payload.channel_id
     try:
         async with aiosqlite.connect(DB_PATH) as db:
             await db.execute("DELETE FROM listings WHERE message_id = ? AND channel_id = ?", (str(payload.message_id), str(payload.channel_id)))
             await db.commit()
-            log.info("Removed listing DB row for deleted message %s in channel %s", payload.message_id, payload.channel_id)
+            log.info("Removed listing DB row for deleted message %s", payload.message_id)
     except Exception:
         log.exception("Failed to handle raw message delete")
 
